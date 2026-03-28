@@ -14,7 +14,7 @@ import type { Ticket } from '../../types/ticket.types';
 
 const { Title, Text } = Typography;
 
-export default function AgentView() {
+export default function AgentView({ pageTitle = 'My dashboard' }: { pageTitle?: string } = {}) {
   const navigate = useNavigate();
   const [filters, setFilters] = useState<Record<string, any>>({});
   const { data, isLoading } = useTickets(filters);
@@ -37,7 +37,7 @@ export default function AgentView() {
 
   return (
     <div>
-      <Title level={3} style={{ marginBottom: 24 }}>My Dashboard</Title>
+      <Title level={3} style={{ marginBottom: 24 }}>{pageTitle}</Title>
 
       <Row gutter={[16, 16]} style={{ marginBottom: 20 }}>
         <Col span={8}>

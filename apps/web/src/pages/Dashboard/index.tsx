@@ -9,6 +9,7 @@ export default function DashboardPage() {
   const role = user?.role || 'agent';
 
   if (role === 'super_admin') return <AdminView />;
-  if (role === 'manager') return <ManagerView />;
+  if (role === 'manager') return <ManagerView title="Manager dashboard" />;
+  if (role === 'team_lead') return <AgentView pageTitle="Team lead dashboard" />;
   return <AgentView />;
 }

@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { Ticket } from './entities/ticket.entity';
 import { TicketNote } from './entities/ticket-note.entity';
@@ -19,7 +19,7 @@ import { AiModule } from '../ai/ai.module';
     DepartmentsModule,
     AuditModule,
     SlaModule,
-    AiModule,
+    forwardRef(() => AiModule),
   ],
   controllers: [TicketsController],
   providers: [TicketsService, TicketsGateway],

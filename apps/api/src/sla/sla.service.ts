@@ -23,6 +23,17 @@ export class SlaService {
     return this.slaPolicyRepo.findOne({ where: { departmentId, priority } }) || null;
   }
 
+  /** When a ticket gains a department (e.g. AI classification), attach SLA deadlines if missing */
+  async ensureSlaForTicket(ticket: Ticket): Promise<void> {
+    if (ticket.slaResolutionAt || !ticket.departmentId) return;
+    const sla = await this.findPolicy(ticket.departmentId, ticket.priority);
+    if (!sla) return;
+    /** Clock starts at ticket creation (ingest time), not when classification finishes */
+    const anchor = ticket.createdAt ? new Date(ticket.createdAt) : new Date();
+    ticket.slaFirstResponseAt = new Date(anchor.getTime() + sla.firstResponseHours * 3600000);
+    ticket.slaResolutionAt = new Date(anchor.getTime() + sla.resolutionHours * 3600000);
+  }
+
   async findAll(deptId?: string): Promise<SlaPolicy[]> {
     const where = deptId ? { departmentId: deptId } : {};
     return this.slaPolicyRepo.find({ where, relations: ['department'] });
@@ -38,10 +49,9 @@ export class SlaService {
     return this.slaPolicyRepo.findOne({ where: { id }, relations: ['department'] });
   }
 
-  @Cron('*/5 * * * *')
+  /** ~3× per day; SLA deadlines are stored on tickets and shown in real time in the UI */
+  @Cron('0 6,14,22 * * *')
   async checkSlaBreaches() {
-    this.logger.debug('Running SLA breach check...');
-
     const activeStatuses = [TicketStatus.NEW, TicketStatus.ASSIGNED, TicketStatus.IN_PROGRESS, TicketStatus.PENDING];
 
     // Find breached but not yet marked

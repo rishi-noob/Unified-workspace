@@ -7,9 +7,15 @@ import SlaDonut from '../../components/charts/SlaDonut';
 import ChannelBreakdown from '../../components/charts/ChannelBreakdown';
 import LoadingSpinner from '../../components/common/LoadingSpinner';
 
-const { Title } = Typography;
+const { Title, Paragraph } = Typography;
 
-export default function ManagerView() {
+export default function ManagerView({
+  title = 'Manager dashboard',
+  subtitle,
+}: {
+  title?: string;
+  subtitle?: string;
+} = {}) {
   const { data: overview, isLoading } = useAnalyticsOverview();
   const { data: volume } = useAnalyticsVolume();
   const { data: sla } = useAnalyticsSla();
@@ -19,7 +25,10 @@ export default function ManagerView() {
 
   return (
     <div>
-      <Title level={3} style={{ marginBottom: 24 }}>Manager Dashboard</Title>
+      <Title level={3} style={{ marginBottom: subtitle ? 8 : 24 }}>{title}</Title>
+      {subtitle ? (
+        <Paragraph type="secondary" style={{ marginBottom: 24 }}>{subtitle}</Paragraph>
+      ) : null}
 
       <Row gutter={[16, 16]} style={{ marginBottom: 24 }}>
         <Col span={6}>

@@ -1,18 +1,39 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Inject, forwardRef } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Repository, In } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { Ticket } from '../tickets/entities/ticket.entity';
+import { User } from '../users/entities/user.entity';
 import { DepartmentsService } from '../departments/departments.service';
 import { AuditService } from '../audit/audit.service';
+import { SlaService } from '../sla/sla.service';
+import { UserRole } from '../common/types/role.enum';
+import { TicketStatus } from '../common/types/ticket-status.enum';
 import { CLASSIFY_SYSTEM_PROMPT } from './prompts/classify.prompt';
 import { REPLY_DRAFT_SYSTEM_PROMPT } from './prompts/reply-draft.prompt';
+import { TicketsGateway } from '../tickets/tickets.gateway';
 
+/** First match wins — HR before Travel so “salary reimbursement” hits HR; Travel catches trip/expense claims */
 const KEYWORD_RULES = [
-  { dept: 'IT',     patterns: [/\b(vpn|laptop|software|install|access|password|server|network|wifi|email setup|computer|pc|hardware|printer|monitor|screen|keyboard|mouse|browser|antivirus|malware)\b/i] },
-  { dept: 'HR',     patterns: [/\b(leave|payroll|salary|onboard|offboard|policy|contract|benefits|appraisal|pf|provident|insurance|resignation|joining|attendance|hr|human resource)\b/i] },
-  { dept: 'Travel', patterns: [/\b(flight|hotel|travel|reimbursement|cab|taxi|visa|booking|trip|accommodation|train|bus|transit|airport|expense)\b/i] },
+  {
+    dept: 'IT',
+    patterns: [
+      /\b(vscode|vs\s*code|visual\s+studio|visualstudio|github|git\b|docker|kubernetes|terminal|ide|extension|npm|node\.?js|python|java|sql|database|api\s+key|oauth|sso|mfa|2fa|vpn|laptop|software|install|access|password|server|network|wifi|wi-?fi|email\s+setup|computer|pc|hardware|printer|monitor|screen|keyboard|mouse|browser|antivirus|malware|outlook|teams|slack|zoom|sharepoint|onedrive|excel\s+crash|word\s+crash)\b/i,
+    ],
+  },
+  {
+    dept: 'HR',
+    patterns: [
+      /\b(paycheck|pay\s*cheque|paycheque|salary|wages|wage|payroll|not\s+credited|missing\s+payment|bonus|compensation|leave|pto|vacation|sick\s+leave|onboard|offboard|policy|contract|benefits|appraisal|pf\b|provident|insurance|resignation|joining|attendance|\bhr\b|human\s+resources?)\b/i,
+    ],
+  },
+  {
+    dept: 'Travel',
+    patterns: [
+      /\b(flight|hotel|travel|reimbursement|mileage|per\s*diem|expense\s+claim|cab|taxi|uber|lyft|visa|booking|trip|accommodation|train|bus|transit|airport|expense\s+report)\b/i,
+    ],
+  },
 ];
 
 interface ClassifyResult {
@@ -35,9 +56,13 @@ export class AiService {
 
   constructor(
     @InjectRepository(Ticket) private ticketsRepo: Repository<Ticket>,
+    @InjectRepository(User) private usersRepo: Repository<User>,
     private configService: ConfigService,
     private deptService: DepartmentsService,
     private auditService: AuditService,
+    private slaService: SlaService,
+    @Inject(forwardRef(() => TicketsGateway))
+    private ticketsGateway: TicketsGateway,
   ) {
     const apiKey = this.configService.get<string>('GEMINI_API_KEY');
     if (apiKey && apiKey !== 'placeholder' && apiKey.length > 10) {
@@ -95,6 +120,28 @@ export class AiService {
 
   private recordSuccess() { this.consecutiveFailures = 0; }
 
+  private forceCircuitOpen(reason: string) {
+    this.circuitOpen = true;
+    this.circuitOpenedAt = new Date();
+    this.logger.warn(`Gemini circuit forced OPEN: ${reason}`);
+  }
+
+  private geminiClassifyEnabled(): boolean {
+    return this.configService.get<string>('GEMINI_CLASSIFY_ENABLED')?.toLowerCase() !== 'false';
+  }
+
+  private async resolveDepartmentForCategory(category: string) {
+    const raw = category.trim();
+    if (!raw || raw === 'Other') return null;
+    const byName = await this.deptService.findByName(raw);
+    if (byName) return byName;
+    const slug = raw.toLowerCase();
+    if (['it', 'hr', 'travel'].includes(slug)) {
+      return this.deptService.findBySlug(slug);
+    }
+    return null;
+  }
+
   // ── Classification ────────────────────────────────────────────────────────
 
   async classifyTicket(ticketId: string): Promise<void> {
@@ -105,29 +152,55 @@ export class AiService {
       const text = `${ticket.subject} ${ticket.description.substring(0, 500)}`;
       const cleanText = this.stripPii(text);
 
-      // 1. Try keyword rules first (free, instant)
-      let result: ClassifyResult | null = this.keywordClassify(cleanText);
+      // 1. Keywords on raw + cleaned (emails stripped only for Gemini)
+      let result: ClassifyResult | null = this.keywordClassify(text) || this.keywordClassify(cleanText);
 
-      // 2. Try Gemini if no keyword match and circuit is closed
-      if (!result && this.gemini && !this.isCircuitOpen()) {
-        result = await this.callGeminiClassify(ticket.subject, cleanText);
+      let source: 'keywords' | 'gemini' | 'fallback' = result ? 'keywords' : 'fallback';
+
+      // 2. Gemini only when enabled, no keyword hit, key present, circuit closed
+      if (!result && this.gemini && this.geminiClassifyEnabled() && !this.isCircuitOpen()) {
+        const geminiResult = await this.callGeminiClassify(ticket.subject, cleanText);
+        if (geminiResult) {
+          result = geminiResult;
+          source = 'gemini';
+        }
       }
 
-      // 3. Fallback: unclassified
+      // 3. Fallback: unclassified (no random department — stays unassigned or keeps mail-routed dept)
       if (!result) {
-        result = { category: 'Other', confidence: 0, sentiment: 'neutral', sentimentReason: 'Could not classify', reasoning: 'No keyword match and AI unavailable' };
+        result = {
+          category: 'Other',
+          confidence: 0,
+          sentiment: 'neutral',
+          sentimentReason: 'Could not classify',
+          reasoning:
+            source === 'fallback' && this.gemini && !this.geminiClassifyEnabled()
+              ? 'GEMINI_CLASSIFY_ENABLED=false — keyword-only mode'
+              : 'No keyword match; Gemini unavailable, rate-limited, or returned nothing',
+        };
+        source = 'fallback';
       }
 
-      // Persist results
+      const deptBefore = ticket.departmentId;
+
+      // Persist AI fields (category is advisory; department only applied when confident)
       ticket.aiCategory = result.category;
       ticket.aiSentiment = result.sentiment as any;
       ticket.aiConfidence = result.confidence;
 
-      // Auto-assign dept when confident enough
-      if (result.confidence >= 0.8 && result.category !== 'Other' && !ticket.departmentId) {
-        const dept = await this.deptService.findByName(result.category);
-        if (dept) ticket.departmentId = dept.id;
+      if (result.confidence >= 0.8 && result.category !== 'Other') {
+        const dept = await this.resolveDepartmentForCategory(result.category);
+        if (dept) {
+          if (ticket.departmentId !== dept.id) {
+            ticket.slaFirstResponseAt = null;
+            ticket.slaResolutionAt = null;
+          }
+          ticket.departmentId = dept.id;
+        }
       }
+
+      await this.slaService.ensureSlaForTicket(ticket);
+      const assignedNow = await this.tryAssignToTeamMember(ticket);
 
       await this.ticketsRepo.save(ticket);
       await this.auditService.log({
@@ -135,10 +208,72 @@ export class AiService {
         afterState: JSON.stringify({ category: result.category, confidence: result.confidence, sentiment: result.sentiment }),
       });
 
-      this.logger.log(`Classified ticket ${ticketId}: ${result.category} (${(result.confidence * 100).toFixed(0)}%) via ${this.gemini && result.confidence < 0.95 ? 'Gemini' : 'keywords'}`);
+      this.ticketsGateway.emitTicketUpdated(ticketId, { status: ticket.status, aiCategory: ticket.aiCategory }, ticket.departmentId);
+      this.ticketsGateway.emitAiInsightsReady(ticketId, result.category, result.sentiment, ticket.departmentId);
+      if (assignedNow && ticket.assignedToId) {
+        const u = await this.usersRepo.findOne({ where: { id: ticket.assignedToId } });
+        if (u) this.ticketsGateway.emitTicketAssigned(ticket.id, u.id, u);
+      }
+
+      this.logger.log(
+        `Classified ticket ${ticketId}: ${result.category} (${(result.confidence * 100).toFixed(0)}%) [${source}]` +
+          (deptBefore !== ticket.departmentId ? ` dept ${deptBefore || 'none'} → ${ticket.departmentId || 'none'}` : ''),
+      );
     } catch (err) {
       this.logger.error(`classifyTicket failed for ${ticketId}: ${err.message}`);
     }
+  }
+
+  /**
+   * Single shared inbox: after content routing sets department (AI/keywords or mail),
+   * assign to the active agent in that dept with the fewest open tickets (load balance).
+   */
+  private async tryAssignToTeamMember(ticket: Ticket): Promise<boolean> {
+    if (!ticket.departmentId || ticket.assignedToId) return false;
+
+    const agents = await this.usersRepo.find({
+      where: { isActive: true, role: UserRole.AGENT },
+    });
+    const inDept = agents.filter((a) => a.getDepartmentIdArray().includes(ticket.departmentId));
+    if (!inDept.length) {
+      this.logger.debug(`No active agent in department ${ticket.departmentId} — ticket stays unassigned`);
+      return false;
+    }
+
+    const openStatuses = [
+      TicketStatus.NEW,
+      TicketStatus.ASSIGNED,
+      TicketStatus.IN_PROGRESS,
+      TicketStatus.PENDING,
+    ];
+    let best = inDept[0];
+    let bestCount = Number.MAX_SAFE_INTEGER;
+    for (const a of inDept) {
+      const n = await this.ticketsRepo.count({
+        where: {
+          assignedToId: a.id,
+          departmentId: ticket.departmentId,
+          status: In(openStatuses),
+        },
+      });
+      if (n < bestCount) {
+        bestCount = n;
+        best = a;
+      }
+    }
+
+    ticket.assignedToId = best.id;
+    if (ticket.status === TicketStatus.NEW) ticket.status = TicketStatus.ASSIGNED;
+
+    await this.auditService.log({
+      entityType: 'ticket',
+      entityId: ticket.id,
+      action: 'auto_assigned',
+      afterState: JSON.stringify({ assignedToId: best.id, assigneeEmail: best.email }),
+    });
+
+    this.logger.log(`Ticket ${ticket.id} → ${best.email} (least busy agent in department)`);
+    return true;
   }
 
   private async callGeminiClassify(subject: string, cleanText: string): Promise<ClassifyResult | null> {
@@ -164,8 +299,15 @@ export class AiService {
         reasoning: parsed.reasoning || '',
       };
     } catch (err) {
-      this.logger.error(`Gemini classify error: ${err.message}`);
-      this.recordFailure();
+      const msg = err instanceof Error ? err.message : String(err);
+      const is429 = msg.includes('429') || msg.includes('Too Many Requests') || msg.includes('quota');
+      if (is429) {
+        this.logger.warn(`Gemini classify rate limited / quota — using keywords only until circuit resets (${msg.substring(0, 120)}…)`);
+        this.forceCircuitOpen('429 / quota');
+      } else {
+        this.logger.error(`Gemini classify error: ${msg}`);
+        this.recordFailure();
+      }
       return null;
     }
   }

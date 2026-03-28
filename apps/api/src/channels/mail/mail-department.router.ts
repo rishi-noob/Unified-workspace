@@ -16,8 +16,9 @@ function normalizeSlug(raw: string): DeptSlug | null {
 }
 
 /**
- * Resolve department for one shared inbox (e.g. rishabhathrit@gmail.com).
- * Priority: 1) +it / +hr / +travel in recipient address  2) [IT]/[HR]/[TRAVEL] in subject  3) match department emailAlias
+ * Optional overrides when everything goes to one mailbox.
+ * Primary routing is: AI + keywords in AiService → IT/HR/Travel → auto-assign to agents.
+ * Priority here: 1) +it / +hr / +travel in recipient  2) [IT]/[HR]/[TRAVEL] in subject  3) emailAlias match
  */
 export function resolveDepartmentIdFromMail(
   departments: DepartmentEntity[],

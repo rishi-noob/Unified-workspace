@@ -8,7 +8,8 @@
     "start:dev": "nest start --watch",
     "start:debug": "nest start --debug --watch",
     "start:prod": "node dist/main",
-    "seed": "ts-node src/database/seed.ts"
+    "seed": "ts-node src/database/seed.ts",
+    "verify": "pnpm run build && pnpm run seed && node scripts/smoke-verify.mjs"
   },
   "dependencies": {
     "@nestjs/common": "^10.0.0",

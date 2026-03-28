@@ -1,10 +1,28 @@
 import React, { useState } from 'react';
-import { Card, Typography, Button, Table, Tag, Progress, Alert, Space, Upload } from 'antd';
+import {
+  Card, Typography, Button, Table, Tag, Progress, Alert, Space, Upload, Descriptions, Divider, message,
+} from 'antd';
 import { InboxOutlined, CheckCircleOutlined, CloseCircleOutlined, DownloadOutlined } from '@ant-design/icons';
 import { channelsApi } from '../../api/channels.api';
 
-const { Title, Text } = Typography;
+const { Title, Text, Paragraph } = Typography;
 const { Dragger } = Upload;
+
+const REQUIRED_HEADERS = [
+  { key: 'subject', desc: 'Short title (max 255 characters)' },
+  { key: 'description', desc: 'Full request details' },
+  { key: 'department', desc: 'Must match a department slug: it, hr, or travel' },
+  { key: 'priority', desc: 'One of: low, normal, high, critical' },
+  { key: 'requester_email', desc: 'Valid email of the person raising the request' },
+];
+
+function parseUploadError(err: unknown): string {
+  const e = err as { response?: { data?: { error?: { message?: string | string[] } } } };
+  const m = e?.response?.data?.error?.message;
+  if (Array.isArray(m)) return m.join(', ');
+  if (typeof m === 'string') return m;
+  return 'Upload failed';
+}
 
 export default function ExcelUpload() {
   const [file, setFile] = useState<File | null>(null);
@@ -18,9 +36,13 @@ export default function ExcelUpload() {
     setProgress(0);
     try {
       const res = await channelsApi.uploadExcel(file, setProgress);
-      setResult(res.data || res);
-    } catch (err: any) {
-      setResult({ error: err.response?.data?.error?.message || 'Upload failed' });
+      const payload = (res as any)?.data ?? res;
+      setResult(payload);
+      if (payload?.imported > 0) {
+        message.success(`Imported ${payload.imported} ticket(s)`);
+      }
+    } catch (err: unknown) {
+      setResult({ error: parseUploadError(err) });
     } finally {
       setUploading(false);
     }
@@ -28,15 +50,49 @@ export default function ExcelUpload() {
 
   const errorColumns = [
     { title: 'Row', dataIndex: 'row', key: 'row', width: 80 },
-    { title: 'Errors', dataIndex: 'errors', key: 'errors', render: (errs: string[]) => errs.map((e, i) => <Tag color="red" key={i}>{e}</Tag>) },
+    {
+      title: 'Errors',
+      dataIndex: 'errors',
+      key: 'errors',
+      render: (errs: string[]) => errs.map((e, i) => <Tag color="red" key={i}>{e}</Tag>),
+    },
   ];
 
   return (
-    <div style={{ maxWidth: 800, margin: '0 auto' }}>
+    <div style={{ maxWidth: 920, margin: '0 auto' }}>
       <Title level={3}>Excel Upload</Title>
-      <Text type="secondary">Upload an Excel file (.xlsx, .xls, .csv) with columns: Subject, Description, Department, Priority, Requester Email</Text>
+      <Paragraph type="secondary" style={{ marginBottom: 16 }}>
+        Bulk-create tickets from <Text strong>.xlsx</Text>, <Text strong>.xls</Text>, or <Text strong>.csv</Text>.
+        The <Text strong>first sheet</Text> is read. Row 1 must be the header row; each following row is one ticket.
+        (Requires <Text code>team_lead</Text> role or higher for this page.)
+      </Paragraph>
 
-      <Card style={{ marginTop: 20, borderRadius: 12 }}>
+      <Card title="Required format (row 1 = headers)" style={{ marginBottom: 20, borderRadius: 12 }}>
+        <Descriptions column={1} size="small" bordered>
+          {REQUIRED_HEADERS.map((h) => (
+            <Descriptions.Item key={h.key} label={<Text code>{h.key}</Text>}>
+              {h.desc}
+            </Descriptions.Item>
+          ))}
+        </Descriptions>
+        <Divider style={{ margin: '16px 0' }} />
+        <Text type="secondary">
+          Header names are matched case-insensitively; spaces become underscores (e.g. &quot;Requester Email&quot; →
+          requester_email).
+        </Text>
+        <div style={{ marginTop: 16 }}>
+          <Space wrap align="start">
+            <a href="/ticketing-bulk-import-template.csv" download="ticketing-bulk-import-template.csv">
+              <Button type="link" icon={<DownloadOutlined />} style={{ paddingLeft: 0 }}>
+                Download sample CSV
+              </Button>
+            </a>
+            <Text type="secondary">Open in Excel or Google Sheets, edit, then save as .xlsx if you prefer.</Text>
+          </Space>
+        </div>
+      </Card>
+
+      <Card style={{ borderRadius: 12 }}>
         <Dragger
           accept=".xlsx,.xls,.csv"
           maxCount={1}

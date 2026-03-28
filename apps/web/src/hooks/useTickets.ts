@@ -9,7 +9,7 @@ export function useTickets(params?: Record<string, any>) {
       const res = await ticketsApi.list(params);
       return res.data || res;
     },
-    refetchInterval: 30000,
+    refetchInterval: 20000,
   });
 }
 
@@ -21,6 +21,7 @@ export function useTicket(id: string) {
       return res.data || res;
     },
     enabled: !!id,
+    refetchInterval: 20000,
   });
 }
 
@@ -35,7 +36,10 @@ export function useCreateTicket() {
       qc.invalidateQueries({ queryKey: ['tickets'] });
       message.success('Ticket created');
     },
-    onError: () => message.error('Failed to create ticket'),
+    onError: (err: unknown) => {
+      const msg = (err as { response?: { data?: { message?: string } } })?.response?.data?.message;
+      message.error(typeof msg === 'string' ? msg : 'Failed to create ticket');
+    },
   });
 }
 
@@ -50,6 +54,11 @@ export function useUpdateTicket() {
       qc.invalidateQueries({ queryKey: ['tickets'] });
       qc.invalidateQueries({ queryKey: ['ticket', vars.id] });
       message.success('Ticket updated');
+    },
+    onError: (err: unknown) => {
+      const d = (err as { response?: { data?: { message?: string; errors?: unknown } } })?.response?.data;
+      const msg = d?.message || (Array.isArray(d?.errors) ? 'Validation failed — check required fields' : null);
+      message.error(typeof msg === 'string' ? msg : 'Could not update ticket');
     },
   });
 }
@@ -73,6 +82,13 @@ export function useAiDraft() {
     mutationFn: async (ticketId: string) => {
       const res = await ticketsApi.aiDraft(ticketId);
       return res.data || res;
+    },
+    onSuccess: (data: { draft?: string }) => {
+      if (data?.draft) message.success('AI draft generated — review and edit before sending');
+    },
+    onError: (err: unknown) => {
+      const msg = (err as { response?: { data?: { message?: string } } })?.response?.data?.message;
+      message.error(typeof msg === 'string' ? msg : 'Could not generate AI draft');
     },
   });
 }

@@ -23,6 +23,7 @@ import {
 import { DepartmentsService } from '../departments/departments.service';
 import { SlaService } from '../sla/sla.service';
 import { AuditService } from '../audit/audit.service';
+import { TicketsGateway } from './tickets.gateway';
 
 export interface TicketQueryFilter {
   status?: string;
@@ -48,6 +49,7 @@ export class TicketsService {
     private deptService: DepartmentsService,
     private slaService: SlaService,
     private auditService: AuditService,
+    private ticketsGateway: TicketsGateway,
   ) {}
 
   /** Same visibility rules as list queries — used for single-ticket access */
@@ -178,7 +180,9 @@ export class TicketsService {
       );
     }
 
-    return this.findById(saved.id, user);
+    const created = await this.findById(saved.id, user);
+    this.ticketsGateway.emitTicketCreated(created, created.departmentId || undefined);
+    return created;
   }
 
   async update(id: string, dto: UpdateTicketDto, user: User): Promise<Ticket> {
@@ -206,7 +210,9 @@ export class TicketsService {
       afterState: JSON.stringify({ status: saved.status, priority: saved.priority, assignedToId: saved.assignedToId }),
     });
 
-    return this.findById(saved.id, user);
+    const fresh = await this.findById(saved.id, user);
+    this.ticketsGateway.emitTicketUpdated(id, { status: fresh.status, priority: fresh.priority }, fresh.departmentId);
+    return fresh;
   }
 
   async softDelete(id: string, user: User): Promise<void> {
@@ -243,6 +249,7 @@ export class TicketsService {
         ticket.status = TicketStatus.IN_PROGRESS;
       }
       await this.ticketsRepo.save(ticket);
+      this.ticketsGateway.emitTicketUpdated(ticketId, { status: ticket.status }, ticket.departmentId);
     }
 
     await this.auditService.log({ entityType: 'ticket', entityId: ticketId, action: 'reply_sent', changedById: user.id });
@@ -262,7 +269,12 @@ export class TicketsService {
       changedById: user.id,
       afterState: JSON.stringify({ assignedToId: dto.assigneeId }),
     });
-    return this.findById(saved.id, user);
+    const assigned = await this.findById(saved.id, user);
+    this.ticketsGateway.emitTicketUpdated(ticketId, { status: assigned.status, assignedToId: assigned.assignedToId }, assigned.departmentId);
+    if (dto.assigneeId) {
+      this.ticketsGateway.emitTicketAssigned(ticketId, dto.assigneeId, assigned.assignedTo);
+    }
+    return assigned;
   }
 
   async getNotes(ticketId: string, user: User): Promise<TicketNote[]> {

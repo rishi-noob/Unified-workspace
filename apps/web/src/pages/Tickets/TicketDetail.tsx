@@ -1,13 +1,15 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Row, Col, Card, Typography, Tag, Space, Descriptions, Button, Input, List,
-  Divider, Tabs, Spin, Tooltip, Progress, message,
+  Divider, Tabs, Spin, Tooltip, Progress,
 } from 'antd';
 import {
   ArrowLeftOutlined, RobotOutlined, SendOutlined, SyncOutlined,
 } from '@ant-design/icons';
 import { useParams, useNavigate } from 'react-router-dom';
+import { useQueryClient } from '@tanstack/react-query';
 import { useTicket, useReplyTicket, useUpdateTicket, useAiDraft } from '../../hooks/useTickets';
+import { useSocket } from '../../hooks/useSocket';
 import PriorityBadge from '../../components/common/PriorityBadge';
 import StatusBadge from '../../components/common/StatusBadge';
 import DepartmentTag from '../../components/common/DepartmentTag';
@@ -26,8 +28,31 @@ export default function TicketDetail() {
   const reply = useReplyTicket();
   const updateTicket = useUpdateTicket();
   const aiDraft = useAiDraft();
+  const qc = useQueryClient();
+  const { socket } = useSocket();
   const [replyText, setReplyText] = useState('');
   const [tab, setTab] = useState('replies');
+
+  useEffect(() => {
+    if (!socket || !id) return;
+    socket.emit('join:ticket', id);
+    const refresh = () => {
+      qc.invalidateQueries({ queryKey: ['ticket', id] });
+      qc.invalidateQueries({ queryKey: ['tickets'] });
+    };
+    const onAi = (p: { ticketId?: string }) => {
+      if (p?.ticketId === id) refresh();
+    };
+    socket.on('ticket:updated', refresh);
+    socket.on('ticket:created', refresh);
+    socket.on('ai:insights-ready', onAi);
+    return () => {
+      socket.emit('leave:ticket', id);
+      socket.off('ticket:updated', refresh);
+      socket.off('ticket:created', refresh);
+      socket.off('ai:insights-ready', onAi);
+    };
+  }, [socket, id, qc]);
 
   if (isLoading) return <LoadingSpinner tip="Loading ticket..." />;
   if (!ticket) return <div>Ticket not found</div>;
@@ -40,7 +65,6 @@ export default function TicketDetail() {
   const handleAiDraft = async () => {
     const res = await aiDraft.mutateAsync(id!);
     setReplyText(res.draft || '');
-    message.success('AI draft generated — review and edit before sending');
   };
 
   const handleStatusChange = (status: string) => {

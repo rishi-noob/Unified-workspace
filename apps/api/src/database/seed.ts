@@ -59,7 +59,7 @@ async function seed() {
     { dept: 'hr', priority: TicketPriority.CRITICAL, firstResponse: 2,  resolution: 8  },
     { dept: 'hr', priority: TicketPriority.HIGH,     firstResponse: 4,  resolution: 24 },
     { dept: 'hr', priority: TicketPriority.NORMAL,   firstResponse: 8,  resolution: 48 },
-    { dept: 'hr', priority: TicketPriority.LOW,      firstResponse: 12, resolution: 72 },
+    { dept: 'hr', priority: TicketPriority.LOW,      firstResponse: 8,  resolution: 48 },
     // Travel
     { dept: 'travel', priority: TicketPriority.CRITICAL, firstResponse: 4,  resolution: 24 },
     { dept: 'travel', priority: TicketPriority.HIGH,     firstResponse: 4,  resolution: 24 },
@@ -89,9 +89,11 @@ async function seed() {
     { name: 'IT Manager',     email: 'it-manager@company.com',   role: UserRole.MANAGER,     depts: ['it'] },
     { name: 'HR Manager',     email: 'hr-manager@company.com',   role: UserRole.MANAGER,     depts: ['hr'] },
     { name: 'IT Lead',        email: 'it-lead@company.com',      role: UserRole.TEAM_LEAD,   depts: ['it'] },
+    { name: 'HR Lead',        email: 'hr-lead@company.com',      role: UserRole.TEAM_LEAD,   depts: ['hr'] },
     { name: 'IT Agent 1',     email: 'it-agent1@company.com',    role: UserRole.AGENT,       depts: ['it'] },
     { name: 'IT Agent 2',     email: 'it-agent2@company.com',    role: UserRole.AGENT,       depts: ['it'] },
     { name: 'HR Agent 1',     email: 'hr-agent1@company.com',    role: UserRole.AGENT,       depts: ['hr'] },
+    { name: 'HR Agent 2',     email: 'hr-agent2@company.com',    role: UserRole.AGENT,       depts: ['hr'] },
     { name: 'Travel Agent',   email: 'travel@company.com',       role: UserRole.AGENT,       depts: ['travel'] },
     { name: 'Multi-dept Lead',email: 'multilead@company.com',    role: UserRole.TEAM_LEAD,   depts: ['it', 'travel'] },
   ];
@@ -115,7 +117,7 @@ async function seed() {
   }
 
   console.log('\n🎉 Seed complete! Demo credentials: <email> / Demo@1234');
-  console.log('   admin@company.com | it-manager@company.com | it-lead@company.com | it-agent1@company.com');
+  console.log('   IT: it-agent1@ / it-agent2@ · HR: hr-agent1@ / hr-agent2@ · Travel: travel@ · Leads: it-lead@ / hr-lead@');
 
   await AppDataSource.destroy();
 }

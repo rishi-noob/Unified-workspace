@@ -16,6 +16,6 @@ export const ticketsApi = {
     apiClient.post(`/tickets/${id}/reply`, { content }),
   assign: (id: string, assigneeId: string, teamId?: string) =>
     apiClient.post(`/tickets/${id}/assign`, { assigneeId, teamId }),
-  aiDraft: (id: string) => apiClient.post(`/tickets/${id}/ai-reply-draft`),
+  aiDraft: (id: string) => apiClient.post(`/tickets/${id}/ai-reply-draft`, {}),
   aiInsights: (id: string) => apiClient.get(`/tickets/${id}/ai-insights`),
 };

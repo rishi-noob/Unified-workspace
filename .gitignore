@@ -40,3 +40,6 @@ uploads/
 # Local SQLite database
 *.db
 *.db-journal
+
+# IMAP ingest high-water mark (machine-local)
+mail-ingest-uid.state.json

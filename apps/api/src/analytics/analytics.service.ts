@@ -1,22 +1,69 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, In } from 'typeorm';
 import { Ticket } from '../tickets/entities/ticket.entity';
 import { TicketStatus, TicketChannel } from '../common/types/ticket-status.enum';
 
+/** Scopes analytics to one department or many (enforced in AnalyticsController for team_lead). */
+export interface AnalyticsDeptScope {
+  departmentId?: string;
+  departmentIds?: string[];
+}
+
 @Injectable()
 export class AnalyticsService {
-  private readonly logger = new Logger(AnalyticsService.name);
-
   constructor(
     @InjectRepository(Ticket) private ticketsRepo: Repository<Ticket>,
   ) {}
 
-  async getOverview(departmentId?: string) {
-    const where: any = {};
-    if (departmentId) where.departmentId = departmentId;
+  private async loadTickets(scope: AnalyticsDeptScope = {}): Promise<Ticket[]> {
+    if (scope.departmentIds && scope.departmentIds.length === 0) {
+      return [];
+    }
+    if (scope.departmentIds?.length) {
+      return this.ticketsRepo.find({ where: { departmentId: In(scope.departmentIds) } });
+    }
+    if (scope.departmentId) {
+      return this.ticketsRepo.find({ where: { departmentId: scope.departmentId } });
+    }
+    return this.ticketsRepo.find();
+  }
 
-    const all = await this.ticketsRepo.find({ where });
+  private applyScopeToQb(qb: ReturnType<Repository<Ticket>['createQueryBuilder']>, scope: AnalyticsDeptScope) {
+    if (scope.departmentIds?.length) {
+      qb.andWhere('ticket.departmentId IN (:...dids)', { dids: scope.departmentIds });
+    } else if (scope.departmentId) {
+      qb.andWhere('ticket.departmentId = :scopeDept', { scopeDept: scope.departmentId });
+    }
+  }
+
+  private buildTicketWhere(
+    scope: AnalyticsDeptScope,
+    filter: { from?: string; to?: string },
+  ): { clause: string; params: Record<string, unknown> } | null {
+    const parts: string[] = [];
+    const params: Record<string, unknown> = {};
+    if (scope.departmentIds?.length) {
+      parts.push('ticket.departmentId IN (:...dids)');
+      params.dids = scope.departmentIds;
+    } else if (scope.departmentId) {
+      parts.push('ticket.departmentId = :scopeDept');
+      params.scopeDept = scope.departmentId;
+    }
+    if (filter.from) {
+      parts.push('ticket.createdAt >= :from');
+      params.from = new Date(filter.from);
+    }
+    if (filter.to) {
+      parts.push('ticket.createdAt <= :to');
+      params.to = new Date(filter.to);
+    }
+    if (!parts.length) return null;
+    return { clause: parts.join(' AND '), params };
+  }
+
+  async getOverview(scope: AnalyticsDeptScope = {}) {
+    const all = await this.loadTickets(scope);
     const open = all.filter(t => ![TicketStatus.RESOLVED, TicketStatus.CLOSED].includes(t.status));
     const today = new Date();
     today.setHours(0, 0, 0, 0);
@@ -39,14 +86,12 @@ export class AnalyticsService {
     };
   }
 
-  async getVolume(filter: { from?: string; to?: string; dept?: string; groupBy?: string }) {
+  async getVolume(filter: { from?: string; to?: string; groupBy?: string }, scope: AnalyticsDeptScope = {}) {
     const qb = this.ticketsRepo.createQueryBuilder('ticket');
-    if (filter.dept) qb.where('ticket.departmentId = :dept', { dept: filter.dept });
-    if (filter.from) qb.andWhere('ticket.createdAt >= :from', { from: new Date(filter.from) });
-    if (filter.to) qb.andWhere('ticket.createdAt <= :to', { to: new Date(filter.to) });
+    const built = this.buildTicketWhere(scope, filter);
+    if (built) qb.where(built.clause, built.params);
     const tickets = await qb.getMany();
 
-    // Group by day
     const groups: Record<string, number> = {};
     for (const t of tickets) {
       const date = new Date(t.createdAt).toISOString().substring(0, 10);
@@ -58,11 +103,10 @@ export class AnalyticsService {
       .map(([date, count]) => ({ date, count }));
   }
 
-  async getSla(filter: { from?: string; to?: string; dept?: string }) {
+  async getSla(filter: { from?: string; to?: string }, scope: AnalyticsDeptScope = {}) {
     const qb = this.ticketsRepo.createQueryBuilder('ticket');
-    if (filter.dept) qb.where('ticket.departmentId = :dept', { dept: filter.dept });
-    if (filter.from) qb.andWhere('ticket.createdAt >= :from', { from: new Date(filter.from) });
-    if (filter.to) qb.andWhere('ticket.createdAt <= :to', { to: new Date(filter.to) });
+    const built = this.buildTicketWhere(scope, filter);
+    if (built) qb.where(built.clause, built.params);
     const tickets = await qb.getMany();
 
     const breached = tickets.filter(t => t.slaBreached).length;
@@ -80,10 +124,10 @@ export class AnalyticsService {
     };
   }
 
-  async getChannelBreakdown(filter: { from?: string; to?: string }) {
+  async getChannelBreakdown(filter: { from?: string; to?: string }, scope: AnalyticsDeptScope = {}) {
     const qb = this.ticketsRepo.createQueryBuilder('ticket');
-    if (filter.from) qb.where('ticket.createdAt >= :from', { from: new Date(filter.from) });
-    if (filter.to) qb.andWhere('ticket.createdAt <= :to', { to: new Date(filter.to) });
+    const built = this.buildTicketWhere(scope, filter);
+    if (built) qb.where(built.clause, built.params);
     const tickets = await qb.getMany();
 
     const channels = [TicketChannel.EMAIL, TicketChannel.EXCEL, TicketChannel.FRESHDESK, TicketChannel.MANUAL];
@@ -93,11 +137,11 @@ export class AnalyticsService {
     }));
   }
 
-  async getAgentStats(filter: { dept?: string; from?: string; to?: string }) {
+  async getAgentStats(filter: { from?: string; to?: string }, scope: AnalyticsDeptScope = {}) {
     const qb = this.ticketsRepo.createQueryBuilder('ticket')
       .leftJoinAndSelect('ticket.assignedTo', 'assignedTo')
       .where('ticket.assignedToId IS NOT NULL');
-    if (filter.dept) qb.andWhere('ticket.departmentId = :dept', { dept: filter.dept });
+    this.applyScopeToQb(qb, scope);
     if (filter.from) qb.andWhere('ticket.createdAt >= :from', { from: new Date(filter.from) });
     if (filter.to) qb.andWhere('ticket.createdAt <= :to', { to: new Date(filter.to) });
     const tickets = await qb.getMany();
