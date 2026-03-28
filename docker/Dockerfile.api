@@ -1,0 +1,17 @@
+FROM node:20-alpine AS base
+RUN npm install -g pnpm
+
+WORKDIR /app
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml* ./
+COPY apps/api/package.json ./apps/api/
+
+RUN pnpm install --frozen-lockfile || pnpm install
+
+COPY apps/api ./apps/api
+
+FROM base AS development
+CMD ["pnpm", "--filter", "api", "run", "start:dev"]
+
+FROM base AS production
+RUN pnpm --filter api run build
+CMD ["node", "apps/api/dist/main.js"]
