@@ -54,12 +54,12 @@ export class TicketsService {
 
   /** Same visibility rules as list queries — used for single-ticket access */
   canAccessTicket(user: User, ticket: Ticket): boolean {
-    if (user.role === UserRole.SUPER_ADMIN || user.role === UserRole.MANAGER) {
+    if (user.role === UserRole.SUPER_ADMIN) {
       return true;
     }
     if (ticket.createdById === user.id) return true;
     const deptIds = user.getDepartmentIdArray();
-    if (user.role === UserRole.TEAM_LEAD) {
+    if (user.role === UserRole.MANAGER || user.role === UserRole.TEAM_LEAD) {
       return !!(ticket.departmentId && deptIds.includes(ticket.departmentId));
     }
     // Agent: assigned to them OR ticket belongs to one of their departments (dept queue)
@@ -82,9 +82,9 @@ export class TicketsService {
 
     const deptIds = user.getDepartmentIdArray();
 
-    if (user.role === UserRole.SUPER_ADMIN || user.role === UserRole.MANAGER) {
+    if (user.role === UserRole.SUPER_ADMIN) {
       // no RBAC filter
-    } else if (user.role === UserRole.TEAM_LEAD) {
+    } else if (user.role === UserRole.MANAGER || user.role === UserRole.TEAM_LEAD) {
       if (deptIds.length > 0) {
         qb.where('ticket.departmentId IN (:...deptIds)', { deptIds });
       }

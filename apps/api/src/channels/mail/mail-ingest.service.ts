@@ -95,6 +95,13 @@ export class MailIngestService implements OnModuleInit, OnModuleDestroy {
   /** If a poll overlaps the next interval, run again immediately after (no skipped cycles). */
   private pollQueued = false;
 
+  /**
+   * IN-MEMORY cursor — the single source of truth between polls.
+   * File is ONLY used for recovery after a full process restart.
+   * This guarantees we never lose track even if the disk write fails.
+   */
+  private memoryBaseline: number | null = null;
+
   constructor(
     private readonly config: ConfigService,
     private readonly ticketsService: TicketsService,
@@ -160,37 +167,30 @@ export class MailIngestService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  /**
-   * Tracks last processed IMAP UID so new mail is ingested even if already marked read in Gmail.
-   * Default path is next to the API package (3 levels up from this file: src/channels/mail → apps/api),
-   * not process.cwd(), so the cursor is stable when pnpm/nest change the working directory.
-   */
   private getUidStatePath(): string {
     const custom = this.config.get<string>('IMAP_UID_STATE_FILE');
-    if (custom?.trim()) return path.resolve(custom.trim());
-    return path.resolve(__dirname, '..', '..', '..', 'mail-ingest-uid.state.json');
+    if (custom?.trim()) return path.resolve(process.cwd(), custom.trim());
+    // Use apps/api directory directly (relative to compiled output)
+    return path.resolve(__dirname, '..', '..', '..', '.mail-ingest-uid.state.json');
   }
 
-  /** @deprecated cwd-based path; read once for migration */
-  private getLegacyUidStatePathCwd(): string {
-    return path.join(process.cwd(), 'mail-ingest-uid.state.json');
-  }
-
-  private async readUidState(): Promise<number | null> {
-    const primary = this.getUidStatePath();
-    const legacy = this.getLegacyUidStatePathCwd();
-    for (const p of [primary, legacy]) {
+  private async readUidStateFromDisk(): Promise<number | null> {
+    // Try the primary path and a few fallback locations
+    const candidates = [
+      this.getUidStatePath(),
+      path.join(process.cwd(), '.mail-ingest-uid.state.json'),
+      path.join(process.cwd(), 'mail-ingest-uid.state.json'),
+    ];
+    // Deduplicate
+    const unique = [...new Set(candidates)];
+    for (const p of unique) {
       try {
         const raw = await fs.readFile(p, 'utf8');
         const j = JSON.parse(raw) as MailUidStateFile;
-        const last =
-          typeof j.lastUid === 'number' && j.lastUid >= 0 ? j.lastUid : null;
-        if (last !== null && p === legacy && legacy !== primary) {
-          this.logger.warn(
-            `Mail ingest: loaded UID state from legacy cwd path ${p}. Future updates → ${primary}.`,
-          );
+        if (typeof j.lastUid === 'number' && j.lastUid >= 0) {
+          this.logger.log(`Mail ingest: restored UID cursor ${j.lastUid} from ${p}`);
+          return j.lastUid;
         }
-        return last;
       } catch {
         continue;
       }
@@ -198,14 +198,26 @@ export class MailIngestService implements OnModuleInit, OnModuleDestroy {
     return null;
   }
 
-  private async writeUidState(lastUid: number): Promise<void> {
+  private async writeUidStateToDisk(lastUid: number): Promise<void> {
+    const filePath = this.getUidStatePath();
     try {
       const payload: MailUidStateFile = { lastUid };
-      await fs.writeFile(this.getUidStatePath(), JSON.stringify(payload), 'utf8');
+      await fs.writeFile(filePath, JSON.stringify(payload), 'utf8');
+      this.logger.debug(`Mail ingest: persisted UID cursor ${lastUid} → ${filePath}`);
     } catch (err) {
       this.logger.warn(
-        `Could not persist IMAP UID state: ${err instanceof Error ? err.message : err}`,
+        `Could not persist IMAP UID state to ${filePath}: ${err instanceof Error ? err.message : err}`,
       );
+      // Fallback: try writing to cwd as well
+      try {
+        const fallbackPath = path.join(process.cwd(), '.mail-ingest-uid.state.json');
+        if (fallbackPath !== filePath) {
+          await fs.writeFile(fallbackPath, JSON.stringify({ lastUid }), 'utf8');
+          this.logger.log(`Mail ingest: persisted UID cursor ${lastUid} → fallback ${fallbackPath}`);
+        }
+      } catch {
+        this.logger.error(`Mail ingest: FAILED to persist UID cursor anywhere! In-memory cursor is ${lastUid}, will survive until process restarts.`);
+      }
     }
   }
 
@@ -226,8 +238,7 @@ export class MailIngestService implements OnModuleInit, OnModuleDestroy {
     const socketTimeoutMs =
       socketTimeoutRaw !== undefined && socketTimeoutRaw !== ''
         ? parseInt(socketTimeoutRaw, 10)
-        : 900000;
-    // Node: setTimeout(0) disables idle timeout. ImapFlow default is 5m which is tight for big fetches.
+        : 30000;
 
     const client = new ImapFlow({
       host,
@@ -235,10 +246,9 @@ export class MailIngestService implements OnModuleInit, OnModuleDestroy {
       secure: port === 993,
       auth: { user, pass },
       logger: false,
-      socketTimeout: Number.isFinite(socketTimeoutMs) ? socketTimeoutMs : 900000,
+      socketTimeout: Number.isFinite(socketTimeoutMs) && socketTimeoutMs > 0 ? socketTimeoutMs : 30000,
     });
 
-    // Without a listener, ImapFlow emits 'error' on socket timeout and crashes the process.
     client.on('error', (err: Error & { code?: string }) => {
       this.logger.warn(
         `IMAP connection error (will reconnect on next poll): ${err.message}${err.code ? ` [${err.code}]` : ''}`,
@@ -253,77 +263,62 @@ export class MailIngestService implements OnModuleInit, OnModuleDestroy {
         const status = await client.status(mailbox, { uidNext: true });
         const uidNext = status.uidNext ?? 1;
 
-        const persisted = await this.readUidState();
-        const baseline = persisted !== null ? persisted : Math.max(0, uidNext - 1);
+        // ── Resolve baseline: memory → disk → uidNext - 1 ──
+        let baseline: number;
+        let isFirstBoot = false;
 
-        const includeUnseenBacklog =
-          this.config.get<string>('IMAP_INCLUDE_UNSEEN_BACKLOG')?.toLowerCase() === 'true';
-
-        if (persisted === null) {
-          this.logger.log(
-            `Mail ingest: UID baseline ${baseline} (uidNext=${uidNext}). ` +
-              (includeUnseenBacklog
-                ? 'Including UNSEEN backlog + new UIDs (IMAP_INCLUDE_UNSEEN_BACKLOG=true).'
-                : 'Only NEW messages (UID > baseline) — old unread mail is NOT ingested. Set IMAP_INCLUDE_UNSEEN_BACKLOG=true to also ticket legacy unread.'),
-          );
-        }
-
-        const unseen = includeUnseenBacklog
-          ? normSearch(await client.search({ seen: false }))
-          : [];
-        const sinceBaseline = normSearch(await client.search({ uid: `${baseline + 1}:*` }));
-        /** Recent UNSEEN only (last ~300 UIDs) — catches edge cases without ingesting full legacy unread */
-        let recentUnseen: number[] = [];
-        if (!includeUnseenBacklog && uidNext > 1) {
-          const recentUidFloor = Math.max(1, uidNext - 300);
-          try {
-            recentUnseen = normSearch(
-              await client.search({
-                uid: `${recentUidFloor}:${uidNext - 1}`,
-                seen: false,
-              }),
+        if (this.memoryBaseline !== null) {
+          // Best case: we already know where we left off from the previous poll
+          baseline = this.memoryBaseline;
+        } else {
+          // Process just started — try to recover from disk
+          const fromDisk = await this.readUidStateFromDisk();
+          if (fromDisk !== null) {
+            baseline = fromDisk;
+            this.memoryBaseline = fromDisk;
+          } else {
+            // True first boot — anchor at current uidNext so we ONLY get future emails
+            baseline = Math.max(0, uidNext - 1);
+            isFirstBoot = true;
+            this.memoryBaseline = baseline;
+            // Persist immediately so even if we crash before finding any email, we don't re-anchor
+            await this.writeUidStateToDisk(baseline);
+            this.logger.log(
+              `Mail ingest: FIRST BOOT — anchored at UID ${baseline} (uidNext=${uidNext}). ` +
+                `Only emails arriving from NOW will be ingested. Old unread mail is ignored.`,
             );
-          } catch (e) {
-            this.logger.warn(`IMAP recent UNSEEN search skipped: ${e instanceof Error ? e.message : e}`);
           }
         }
-        const uidSet = new Set([...unseen, ...sinceBaseline, ...recentUnseen]);
-        /** Newest first — large UNSEEN backlogs used to starve new mail when sorted ascending. */
-        const allUidsDesc = [...uidSet].sort((a, b) => b - a);
 
-        const maxPerPoll = Math.max(
-          1,
-          parseInt(
-            this.config.get<string>('IMAP_MAX_MESSAGES_PER_POLL') || '50',
-            10,
-          ) || 50,
-        );
-        const uids = allUidsDesc.slice(0, maxPerPoll);
+        // ── Search for new emails ──
+        const searchFrom = baseline + 1;
+        // MUST pass { uid: true } so it returns actual UIDs, not sequence numbers.
+        const newUids = normSearch(await client.search({ uid: `${searchFrom}:*` }, { uid: true }))
+          // Filter out UIDs <= baseline (IMAP `UID x:*` can return x-1 in edge cases)
+          .filter(uid => uid > baseline);
 
-        this.logger.log(
-          `Mail ingest poll: uidNext=${uidNext} lastSavedUid=${persisted ?? 'none'} baseline=${baseline} ` +
-            `unseenBacklog=${includeUnseenBacklog ? unseen.length : 'off'} uidRangeNew=${sinceBaseline.length} ` +
-            `recentUnseen=${recentUnseen.length} mergedUids=${uidSet.size} processingThisRound=${uids.length} (newest-first, cap=${maxPerPoll})`,
-        );
+        // Sort ascending — process oldest first so cursor advances linearly with no gaps
+        newUids.sort((a, b) => a - b);
 
-        if (includeUnseenBacklog && allUidsDesc.length > uids.length) {
-          this.logger.warn(
-            `Mail ingest: ${allUidsDesc.length - uids.length} messages deferred to later polls — increase IMAP_MAX_MESSAGES_PER_POLL or mark junk as read in Gmail.`,
-          );
-        }
-
-        if (!uids.length) {
-          if (persisted === null) {
-            await this.writeUidState(baseline);
+        if (newUids.length === 0) {
+          if (!isFirstBoot) {
+            this.logger.debug(
+              `Mail ingest poll: no new mail (baseline=${baseline}, uidNext=${uidNext})`,
+            );
           }
           return;
         }
 
-        const departments = await this.departmentsService.findAll();
-        let maxProcessed = baseline;
+        this.logger.log(
+          `Mail ingest poll: found ${newUids.length} new email(s) — ` +
+            `UIDs [${newUids.join(',')}] (baseline=${baseline}, uidNext=${uidNext})`,
+        );
 
-        for await (const msg of client.fetch(uids, { source: true, envelope: true })) {
-          maxProcessed = Math.max(maxProcessed, msg.uid);
+        // ── Process each email ──
+        const departments = await this.departmentsService.findAll();
+
+        // MUST pass { uid: true } to fetch so it treats newUids as UIDs!
+        for await (const msg of client.fetch(newUids, { source: true, envelope: true }, { uid: true })) {
           const source = msg.source;
           if (!source) continue;
 
@@ -333,19 +328,27 @@ export class MailIngestService implements OnModuleInit, OnModuleDestroy {
             normalizeMessageId(msg.envelope?.messageId as string | undefined) ||
             `imap-${msg.uid}-${Date.now()}`;
 
+          // Deduplicate — skip if we already created a ticket for this message
           const existing = await this.ticketsService.findBySourceExternalId(messageId);
           if (existing) {
+            this.logger.debug(`Mail ingest: uid=${msg.uid} already ticketed (${messageId}) — skipping`);
             await client.messageFlagsAdd(msg.uid, ['\\Seen']);
+            // Still advance cursor past this UID
+            this.memoryBaseline = Math.max(this.memoryBaseline!, msg.uid);
+            await this.writeUidStateToDisk(this.memoryBaseline);
             continue;
           }
 
+          // Skip newsletters / bounces
           const skipBulk =
             this.config.get<string>('IMAP_INGEST_SKIP_BULK')?.toLowerCase() !== 'false';
           if (skipBulk && shouldSkipIngest(parsed)) {
             await client.messageFlagsAdd(msg.uid, ['\\Seen']);
             this.logger.log(
-              `Mail ingest: skipped bulk/automated/list uid=${msg.uid} from=${parsed.from?.value?.[0]?.address || '?'}`,
+              `Mail ingest: skipped bulk/automated uid=${msg.uid} from=${parsed.from?.value?.[0]?.address || '?'}`,
             );
+            this.memoryBaseline = Math.max(this.memoryBaseline!, msg.uid);
+            await this.writeUidStateToDisk(this.memoryBaseline);
             continue;
           }
 
@@ -401,20 +404,25 @@ export class MailIngestService implements OnModuleInit, OnModuleDestroy {
           }
 
           await client.messageFlagsAdd(msg.uid, ['\\Seen']);
+
+          // ── Advance cursor IMMEDIATELY after each email ──
+          this.memoryBaseline = Math.max(this.memoryBaseline!, msg.uid);
+          await this.writeUidStateToDisk(this.memoryBaseline);
+
           this.logger.log(
-            `Ingested mail → ticket ${ticket.id} (dept: ${departmentId ? 'routed' : 'unassigned → AI'})`,
+            `✅ Ingested uid=${msg.uid} → ticket ${ticket.id} | from=${requesterLabel} | subject="${subject.substring(0, 60)}" | cursor now=${this.memoryBaseline}`,
           );
         }
-
-        await this.writeUidState(Math.max(baseline, maxProcessed));
       } finally {
         lock.release();
       }
     } finally {
+      // Aggressively destroy the connection to prevent random socket hangs
+      // that could deadlock `pollLock` and permanently freeze the cron job.
       try {
-        await client.logout();
-      } catch {
         client.close();
+      } catch (err) {
+        this.logger.debug(`Mail ingest: error closing client - ${err instanceof Error ? err.message : err}`);
       }
     }
   }

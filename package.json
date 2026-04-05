@@ -4,15 +4,18 @@
   "private": true,
   "description": "Unified Helpdesk Ticketing Hub",
   "scripts": {
-    "dev": "concurrently \"pnpm --filter api run start:dev\" \"pnpm --filter web run dev\"",
-    "seed": "pnpm --filter api run seed",
-    "dev:api": "pnpm --filter api run start:dev",
-    "dev:web": "pnpm --filter web run dev",
-    "build": "pnpm --filter api run build && pnpm --filter web run build",
-    "build:api": "pnpm --filter api run build",
-    "build:web": "pnpm --filter web run build",
-    "verify": "pnpm --filter api run verify && pnpm --filter web run build"
+    "dev": "concurrently \"npm run start:dev -w api\" \"npm run dev -w web\"",
+    "seed": "npm run seed -w api",
+    "dev:api": "npm run start:dev -w api",
+    "dev:web": "npm run dev -w web",
+    "build": "npm run build -w api && npm run build -w web",
+    "build:api": "npm run build -w api",
+    "build:web": "npm run build -w web",
+    "verify": "npm run verify -w api && npm run build -w web"
   },
+  "workspaces": [
+    "apps/*"
+  ],
   "devDependencies": {
     "concurrently": "^8.2.0"
   }

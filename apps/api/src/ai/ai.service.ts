@@ -19,13 +19,13 @@ const KEYWORD_RULES = [
   {
     dept: 'IT',
     patterns: [
-      /\b(vscode|vs\s*code|visual\s+studio|visualstudio|github|git\b|docker|kubernetes|terminal|ide|extension|npm|node\.?js|python|java|sql|database|api\s+key|oauth|sso|mfa|2fa|vpn|laptop|software|install|access|password|server|network|wifi|wi-?fi|email\s+setup|computer|pc|hardware|printer|monitor|screen|keyboard|mouse|browser|antivirus|malware|outlook|teams|slack|zoom|sharepoint|onedrive|excel\s+crash|word\s+crash)\b/i,
+      /\b(vscode|vs\s*code|visual\s+studio|visualstudio|github|git\b|docker|kubernetes|terminal|ide|extension|npm|node\.?js|python|java|sql|database|api\s+key|oauth|sso|mfa|2fa|vpn|laptop|software|install|access|password|server|network|wifi|wi-?fi|email\s+setup|computer|pc|hardware|printer|monitor|screen|keyboard|mouse|browser|antivirus|malware|outlook|teams|slack|zoom|sharepoint|onedrive|excel\s+crash|word\s+crash|error|bug|glitch|not\s+working|broken)\b/i,
     ],
   },
   {
     dept: 'HR',
     patterns: [
-      /\b(paycheck|pay\s*cheque|paycheque|salary|wages|wage|payroll|not\s+credited|missing\s+payment|bonus|compensation|leave|pto|vacation|sick\s+leave|onboard|offboard|policy|contract|benefits|appraisal|pf\b|provident|insurance|resignation|joining|attendance|\bhr\b|human\s+resources?)\b/i,
+      /\b(pay\s*check|paycheque|salary|wages|wage|payroll|not\s+credited|missing\s+payment|bonus|compensation|leave|pto|vacation|sick\s+leave|onboard|offboard|policy|contract|benefits|appraisal|pf\b|provident|insurance|resignation|joining|attendance|\bhr\b|human\s+resources?)\b/i,
     ],
   },
   {
@@ -84,13 +84,20 @@ export class AiService {
   }
 
   private keywordClassify(text: string): ClassifyResult | null {
+    const isUrgent = /\b(urgent|asap|immediately|p1|sev-?1|critical|outage|down|broken)\b/i.test(text);
+    const isNegative = /\b(annoyed|frustrated|angry|unacceptable|awful|terrible|worst|hate|stupid|furious|not\s+working|delayed|missing)\b/i.test(text);
+    
+    let derivedSentiment = 'neutral';
+    if (isUrgent) derivedSentiment = 'urgent';
+    else if (isNegative) derivedSentiment = 'negative';
+
     for (const rule of KEYWORD_RULES) {
       if (rule.patterns.some((p) => p.test(text))) {
         return {
           category: rule.dept,
           confidence: 0.95,
-          sentiment: 'neutral',
-          sentimentReason: 'Keyword match — sentiment not analyzed',
+          sentiment: derivedSentiment,
+          sentimentReason: `Keyword match — sentiment heuristically scaled to ${derivedSentiment}`,
           reasoning: `Matched keyword patterns for ${rule.dept}`,
         };
       }
